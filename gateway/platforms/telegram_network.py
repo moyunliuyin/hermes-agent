@@ -13,6 +13,7 @@ import asyncio
 import ipaddress
 import logging
 import socket
+import time
 from typing import Iterable, Optional
 
 import httpx
@@ -24,6 +25,13 @@ _TELEGRAM_API_HOST = "api.telegram.org"
 # DNS-over-HTTPS providers used to discover Telegram API IPs that may differ
 # from the (potentially unreachable) IP returned by the local system resolver.
 _DOH_TIMEOUT = 4.0  # seconds — bounded so connect() isn't noticeably delayed
+
+# After N consecutive connect failures a fallback IP is parked for TTL seconds
+# so that subsequent requests skip a known-broken IP and try the next one
+# straight away.  Set conservatively: 3 strikes catches genuinely down IPs
+# without flapping under transient packet loss; 5-minute TTL allows recovery.
+_IP_FAILURE_THRESHOLD = 3
+_IP_BLACKLIST_TTL = 300.0  # seconds
 
 _DOH_PROVIDERS: list[dict] = [
     {
@@ -69,16 +77,17 @@ class TelegramFallbackTransport(httpx.AsyncBaseTransport):
         }
         self._sticky_ip: Optional[str] = None
         self._sticky_lock = asyncio.Lock()
+        # Failure tracking: consecutive-failure counts and time-bounded blacklist
+        # entries so a known-broken IP is skipped without re-trying every request.
+        self._failure_counts: dict[str, int] = {}
+        self._blacklist: dict[str, float] = {}
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
         if request.url.host != _TELEGRAM_API_HOST or not self._fallback_ips:
             return await self._primary.handle_async_request(request)
 
-        sticky_ip = self._sticky_ip
-        attempt_order: list[Optional[str]] = [sticky_ip] if sticky_ip else [None]
-        for ip in self._fallback_ips:
-            if ip != sticky_ip:
-                attempt_order.append(ip)
+        now = time.monotonic()
+        attempt_order: list[Optional[str]] = self._build_attempt_order(now)
 
         last_error: Exception | None = None
         for ip in attempt_order:
@@ -86,6 +95,8 @@ class TelegramFallbackTransport(httpx.AsyncBaseTransport):
             transport = self._primary if ip is None else self._fallbacks[ip]
             try:
                 response = await transport.handle_async_request(candidate)
+                if ip is not None:
+                    self._mark_success(ip)
                 if ip is not None and self._sticky_ip != ip:
                     async with self._sticky_lock:
                         if self._sticky_ip != ip:
@@ -106,12 +117,77 @@ class TelegramFallbackTransport(httpx.AsyncBaseTransport):
                         ", ".join(self._fallback_ips),
                     )
                     continue
-                logger.warning("[Telegram] Fallback IP %s failed: %s", ip, exc)
+                parked = self._mark_failure(ip)
+                if parked:
+                    logger.warning(
+                        "[Telegram] Fallback IP %s failed %d times in a row — parking for %.0fs",
+                        ip,
+                        _IP_FAILURE_THRESHOLD,
+                        _IP_BLACKLIST_TTL,
+                    )
+                    if self._sticky_ip == ip:
+                        async with self._sticky_lock:
+                            if self._sticky_ip == ip:
+                                self._sticky_ip = None
+                else:
+                    logger.warning("[Telegram] Fallback IP %s failed: %s", ip, exc)
                 continue
 
         if last_error is None:
             raise RuntimeError("All Telegram fallback IPs exhausted but no error was recorded")
         raise last_error
+
+    def _build_attempt_order(self, now: float) -> list[Optional[str]]:
+        """Compute the per-request attempt order, filtering parked IPs.
+
+        Order: sticky IP (if healthy) → primary host → remaining fallback IPs.
+        If every fallback IP is parked we still try the primary so a recovered
+        upstream path is exercised; if the primary is unreachable too the loop
+        falls back to retrying parked IPs as a last resort.
+        """
+        sticky_ip = self._sticky_ip
+        order: list[Optional[str]] = []
+        if sticky_ip and not self._is_blacklisted(sticky_ip, now):
+            order.append(sticky_ip)
+        else:
+            order.append(None)
+            sticky_ip = None
+        for ip in self._fallback_ips:
+            if ip == sticky_ip:
+                continue
+            if self._is_blacklisted(ip, now):
+                continue
+            order.append(ip)
+        if all(ip is not None and self._is_blacklisted(ip, now) for ip in self._fallback_ips):
+            # Every fallback parked — keep parked IPs as last resort to avoid
+            # a hard outage if the primary path is also down.
+            for ip in self._fallback_ips:
+                if ip not in order:
+                    order.append(ip)
+        return order
+
+    def _is_blacklisted(self, ip: str, now: float) -> bool:
+        expiry = self._blacklist.get(ip)
+        if expiry is None:
+            return False
+        if now >= expiry:
+            self._blacklist.pop(ip, None)
+            return False
+        return True
+
+    def _mark_success(self, ip: str) -> None:
+        self._failure_counts.pop(ip, None)
+        self._blacklist.pop(ip, None)
+
+    def _mark_failure(self, ip: str) -> bool:
+        """Increment failure count. Return True if this hit parked the IP."""
+        count = self._failure_counts.get(ip, 0) + 1
+        if count >= _IP_FAILURE_THRESHOLD:
+            self._blacklist[ip] = time.monotonic() + _IP_BLACKLIST_TTL
+            self._failure_counts.pop(ip, None)
+            return True
+        self._failure_counts[ip] = count
+        return False
 
     async def aclose(self) -> None:
         await self._primary.aclose()
