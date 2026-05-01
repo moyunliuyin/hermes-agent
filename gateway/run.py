@@ -6330,24 +6330,33 @@ class GatewayRunner:
         return event.platform_update_id <= recorded_uid
 
 
+    @staticmethod
+    def _localize_skill_desc(desc: str) -> str:
+        desc = (desc or "").strip()
+        if not desc:
+            return "该技能可用作辅助。"
+        if re.search(r"[\u4e00-\u9fff]", desc):
+            return desc
+        return "查看该技能说明以了解具体功能。"
+
     async def _handle_help_command(self, event: MessageEvent) -> str:
         """Handle /help command - list available commands."""
         from hermes_cli.commands import gateway_help_lines
         lines = [
-            "📖 **Hermes Commands**\n",
+            "📖 **Hermes 命令**\n",
             *gateway_help_lines(),
         ]
+
         try:
             from agent.skill_commands import get_skill_commands
             skill_cmds = get_skill_commands()
             if skill_cmds:
-                lines.append(f"\n⚡ **Skill Commands** ({len(skill_cmds)} active):")
-                # Show first 10, then point to /commands for the rest
+                lines.append(f"\n⚡ **技能命令**（{len(skill_cmds)} 个激活）：")
                 sorted_cmds = sorted(skill_cmds)
                 for cmd in sorted_cmds[:10]:
-                    lines.append(f"`{cmd}` — {skill_cmds[cmd]['description']}")
+                    lines.append(f"`{cmd}` — {self._localize_skill_desc(skill_cmds[cmd].get('description', ''))}")
                 if len(sorted_cmds) > 10:
-                    lines.append(f"\n... and {len(sorted_cmds) - 10} more. Use `/commands` for the full paginated list.")
+                    lines.append(f"\n... 还有 {len(sorted_cmds) - 10} 个未显示。使用 `/commands` 查看完整分页列表。")
         except Exception:
             pass
         return "\n".join(lines)
@@ -6361,26 +6370,25 @@ class GatewayRunner:
             try:
                 requested_page = int(raw_args)
             except ValueError:
-                return "Usage: `/commands [page]`"
+                return "用法：`/commands [page]`"
         else:
             requested_page = 1
 
-        # Build combined entry list: built-in commands + skill commands
         entries = list(gateway_help_lines())
         try:
             from agent.skill_commands import get_skill_commands
             skill_cmds = get_skill_commands()
             if skill_cmds:
                 entries.append("")
-                entries.append("⚡ **Skill Commands**:")
+                entries.append("⚡ **技能命令**：")
                 for cmd in sorted(skill_cmds):
-                    desc = skill_cmds[cmd].get("description", "").strip() or "Skill command"
-                    entries.append(f"`{cmd}` — {desc}")
+                    desc = skill_cmds[cmd].get("description", "").strip()
+                    entries.append(f"`{cmd}` — {self._localize_skill_desc(desc)}")
         except Exception:
             pass
 
         if not entries:
-            return "No commands available."
+            return "暂无可用命令。"
 
         from gateway.config import Platform
         page_size = 15 if event.source.platform == Platform.TELEGRAM else 20
@@ -6390,19 +6398,19 @@ class GatewayRunner:
         page_entries = entries[start:start + page_size]
 
         lines = [
-            f"📚 **Commands** ({len(entries)} total, page {page}/{total_pages})",
+            f"📚 **命令列表**（共 {len(entries)} 项，第 {page}/{total_pages} 页）",
             "",
             *page_entries,
         ]
         if total_pages > 1:
             nav_parts = []
             if page > 1:
-                nav_parts.append(f"`/commands {page - 1}` ← prev")
+                nav_parts.append(f"`/commands {page - 1}` ← 上一页")
             if page < total_pages:
-                nav_parts.append(f"next → `/commands {page + 1}`")
+                nav_parts.append(f"下一页 → `/commands {page + 1}`")
             lines.extend(["", " | ".join(nav_parts)])
         if page != requested_page:
-            lines.append(f"_(Requested page {requested_page} was out of range, showing page {page}.)_")
+            lines.append(f"_(请求的页码 {requested_page} 超出范围，已显示第 {page} 页。)_")
         return "\n".join(lines)
 
     async def _handle_model_command(self, event: MessageEvent) -> Optional[str]:
