@@ -13,6 +13,7 @@ concurrently under distinct configurations).
 
 import hashlib
 import json
+import logging
 import os
 import signal
 import subprocess
@@ -33,6 +34,8 @@ _LOCKS_DIRNAME = "gateway-locks"
 _IS_WINDOWS = sys.platform == "win32"
 _UNSET = object()
 _GATEWAY_LOCK_FILENAME = "gateway.lock"
+
+logger = logging.getLogger(__name__)
 _gateway_lock_handle = None
 
 
@@ -260,12 +263,12 @@ def _cleanup_invalid_pid_path(pid_path: Path, *, cleanup_stale: bool) -> None:
         return
     try:
         pid_path.unlink(missing_ok=True)
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("Stale PID cleanup: failed to unlink %s: %s", pid_path, exc)
     try:
         _get_gateway_lock_path(pid_path).unlink(missing_ok=True)
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("Stale lock cleanup: failed to unlink %s: %s", _get_gateway_lock_path(pid_path), exc)
 
 
 def _write_gateway_lock_record(handle) -> None:
@@ -457,8 +460,8 @@ def remove_pid_file() -> None:
                 # PID file belongs to a different process — leave it alone.
                 return
         path.unlink(missing_ok=True)
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("Self-PID cleanup: failed to unlink %s: %s", path, exc)
 
 
 def acquire_scoped_lock(scope: str, identity: str, metadata: Optional[dict[str, Any]] = None) -> tuple[bool, Optional[dict[str, Any]]]:

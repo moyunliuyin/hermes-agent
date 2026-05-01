@@ -4082,7 +4082,7 @@ class GatewayRunner:
             if event.get_command() in ("queue", "q"):
                 queued_text = event.get_command_args().strip()
                 if not queued_text:
-                    return "Usage: /queue <prompt>"
+                    return "用法：/queue <prompt>"
                 adapter = self.adapters.get(source.platform)
                 if adapter:
                     queued_event = MessageEvent(
@@ -4095,8 +4095,8 @@ class GatewayRunner:
                     self._enqueue_fifo(_quick_key, queued_event, adapter)
                 depth = self._queue_depth(_quick_key, adapter=self.adapters.get(source.platform))
                 if depth <= 1:
-                    return "Queued for the next turn."
-                return f"Queued for the next turn. ({depth} queued)"
+                    return "已排入下一轮队列。"
+                return f"已排入下一轮队列。（队列中 {depth} 项）"
 
             # /steer <prompt> — inject mid-run after the next tool call.
             # Unlike /queue (turn boundary), /steer lands BETWEEN tool-call
@@ -4106,7 +4106,7 @@ class GatewayRunner:
             if _cmd_def_inner and _cmd_def_inner.name == "steer":
                 steer_text = event.get_command_args().strip()
                 if not steer_text:
-                    return "Usage: /steer <prompt>"
+                    return "用法：/steer <prompt>"
                 running_agent = self._running_agents.get(_quick_key)
                 if running_agent is _AGENT_PENDING_SENTINEL:
                     # Agent hasn't started yet — queue as turn-boundary fallback.
@@ -4120,17 +4120,17 @@ class GatewayRunner:
                             channel_prompt=event.channel_prompt,
                         )
                         adapter._pending_messages[_quick_key] = queued_event
-                    return "Agent still starting — /steer queued for the next turn."
+                    return "代理仍在启动——/steer 已排入下一轮。"
                 if running_agent and hasattr(running_agent, "steer"):
                     try:
                         accepted = running_agent.steer(steer_text)
                     except Exception as exc:
                         logger.warning("Steer failed for session %s: %s", _quick_key, exc)
-                        return f"⚠️ Steer failed: {exc}"
+                        return f"⚠️ Steer 失败：{exc}"
                     if accepted:
                         preview = steer_text[:60] + ("..." if len(steer_text) > 60 else "")
-                        return f"⏩ Steer queued — arrives after the next tool call: '{preview}'"
-                    return "Steer rejected (empty payload)."
+                        return f"⏩ Steer 已入队——将在下次工具调用后插入：'{preview}'"
+                    return "Steer 被拒（空内容）。"
                 # Running agent is missing or lacks steer() — fall back to queue.
                 adapter = self.adapters.get(source.platform)
                 if adapter:
@@ -4142,11 +4142,11 @@ class GatewayRunner:
                         channel_prompt=event.channel_prompt,
                     )
                     adapter._pending_messages[_quick_key] = queued_event
-                return "No active agent — /steer queued for the next turn."
+                return "无活跃代理——/steer 已排入下一轮。"
 
             # /model must not be used while the agent is running.
             if _cmd_def_inner and _cmd_def_inner.name == "model":
-                return "Agent is running — wait or /stop first, then switch models."
+                return "代理正在运行——请等待或先 /stop，再切换模型。"
 
             # /approve and /deny must bypass the running-agent interrupt path.
             # The agent thread is blocked on a threading.Event inside
@@ -4472,7 +4472,7 @@ class GatewayRunner:
             # message. If the payload is empty, surface the usage hint.
             steer_payload = event.get_command_args().strip()
             if not steer_payload:
-                return "Usage: /steer <prompt>  (no agent is running; sending as a normal message)"
+                return "用法：/steer <prompt>  （当前无活跃代理，将作为普通消息发送）"
             try:
                 event.text = steer_payload
             except Exception:
@@ -6200,9 +6200,9 @@ class GatewayRunner:
                 interrupt_reason=_INTERRUPT_REASON_STOP,
                 invalidation_reason="stop_command_handler",
             )
-            return "⚡ Stopped. You can continue this session."
+            return "⚡ 已停止。可以继续本会话。"
         else:
-            return "No active task to stop."
+            return "暂无可停止的活跃任务。"
 
     async def _handle_restart_command(self, event: MessageEvent) -> str:
         """Handle /restart command - drain active work, then restart the gateway."""
@@ -6229,8 +6229,8 @@ class GatewayRunner:
         if self._restart_requested or self._draining:
             count = self._running_agent_count()
             if count:
-                return f"⏳ Draining {count} active agent(s) before restart..."
-            return "⏳ Gateway restart already in progress..."
+                return f"⏳ 正在排空 {count} 个活跃代理后重启..."
+            return "⏳ 网关重启已在进行中..."
 
         # Save the requester's routing info so the new gateway process can
         # notify them once it comes back online.
@@ -6277,8 +6277,8 @@ class GatewayRunner:
         else:
             self.request_restart(detached=True, via_service=False)
         if active_agents:
-            return f"⏳ Draining {active_agents} active agent(s) before restart..."
-        return "♻ Restarting gateway. If you aren't notified within 60 seconds, restart from the console with `hermes gateway restart`."
+            return f"⏳ 正在排空 {active_agents} 个活跃代理后重启..."
+        return "♻ 网关重启中。若 60 秒内未收到通知，请在终端执行 `hermes gateway restart`。"
 
     def _is_stale_restart_redelivery(self, event: MessageEvent) -> bool:
         """Return True if this /restart is a Telegram re-delivery we already handled.
@@ -6357,8 +6357,9 @@ class GatewayRunner:
                     lines.append(f"`{cmd}` — {self._localize_skill_desc(skill_cmds[cmd].get('description', ''))}")
                 if len(sorted_cmds) > 10:
                     lines.append(f"\n... 还有 {len(sorted_cmds) - 10} 个未显示。使用 `/commands` 查看完整分页列表。")
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("Failed to load skill commands for /help: %s", exc)
+            lines.append("\n⚠️ 技能命令加载失败，请稍后重试。")
         return "\n".join(lines)
 
     async def _handle_commands_command(self, event: MessageEvent) -> str:
@@ -6384,8 +6385,9 @@ class GatewayRunner:
                 for cmd in sorted(skill_cmds):
                     desc = skill_cmds[cmd].get("description", "").strip()
                     entries.append(f"`{cmd}` — {self._localize_skill_desc(desc)}")
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("Failed to load skill commands for /commands: %s", exc)
+            entries.append("⚠️ 技能命令加载失败，请稍后重试。")
 
         if not entries:
             return "暂无可用命令。"
