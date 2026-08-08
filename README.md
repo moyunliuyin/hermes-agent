@@ -156,6 +156,11 @@ Hermes has two entry points: start the terminal UI with `hermes`, or run the gat
 | Interrupt current work         | `Ctrl+C` or send a new message                | `/stop` or send a new message                                                    |
 | Platform-specific status       | `/platforms`                                  | `/status`, `/sethome`                                                            |
 
+In the terminal UI, run `/model` without arguments to keep using the native
+provider/model picker. Choose **Add or edit custom endpoint** to configure a URL,
+hidden API key, model name, API mode, and display name. The key is stored in
+`~/.hermes/.env`; `config.yaml` keeps only the environment-variable reference.
+
 For the full command lists, see the [CLI guide](https://hermes-agent.nousresearch.com/docs/user-guide/cli) and the [Messaging Gateway guide](https://hermes-agent.nousresearch.com/docs/user-guide/messaging).
 
 ---

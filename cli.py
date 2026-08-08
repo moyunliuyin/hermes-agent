@@ -8957,6 +8957,354 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
         }
         self._invalidate(min_interval=0.0)
 
+    _CUSTOM_MODEL_TEXT_STAGES = frozenset(
+        {"custom_url", "custom_key", "custom_model", "custom_name"}
+    )
+    _CUSTOM_MODEL_API_MODES = (
+        ("", "Auto-detect"),
+        ("chat_completions", "OpenAI Chat Completions"),
+        ("codex_responses", "OpenAI Codex Responses"),
+        ("anthropic_messages", "Anthropic Messages"),
+    )
+
+    def _model_picker_accepts_text(self) -> bool:
+        state = self._model_picker_state or {}
+        return state.get("stage") in self._CUSTOM_MODEL_TEXT_STAGES
+
+    def _model_picker_secret_input_active(self) -> bool:
+        state = self._model_picker_state or {}
+        return state.get("stage") == "custom_key"
+
+    def _model_picker_input_placeholder(self) -> str:
+        state = self._model_picker_state or {}
+        stage = state.get("stage")
+        draft = state.get("custom") or {}
+        if stage == "custom_key":
+            return "type API key (hidden), or Enter to keep the current/no key"
+        defaults = {
+            "custom_url": draft.get("base_url", ""),
+            "custom_model": draft.get("model", ""),
+            "custom_name": draft.get("name", ""),
+        }
+        current = str(defaults.get(stage) or "")
+        if current:
+            return f"type a replacement, or Enter to keep: {current}"
+        labels = {
+            "custom_url": "type the full http:// or https:// API URL",
+            "custom_model": "type the model name sent to the endpoint",
+            "custom_name": "type a provider display name, or Enter for the default",
+        }
+        return labels.get(stage, "")
+
+    @staticmethod
+    def _custom_model_endpoint_id(name: str) -> str:
+        slug = re.sub(r"[^A-Za-z0-9_-]+", "-", name.strip()).strip("-_").lower()
+        return slug or "custom"
+
+    def _build_custom_model_draft(self) -> dict:
+        from hermes_cli.config import (
+            get_compatible_custom_providers,
+            get_env_value,
+            load_config,
+        )
+        from hermes_cli.main import _auto_provider_name
+        from hermes_cli.providers import custom_provider_aliases
+
+        config = load_config()
+        model_cfg = config.get("model")
+        model_cfg = model_cfg if isinstance(model_cfg, dict) else {}
+        current_provider = str(self.provider or model_cfg.get("provider") or "")
+        runtime_url = str(self.base_url or model_cfg.get("base_url") or "").rstrip("/")
+        runtime_model = str(self.model or model_cfg.get("default") or "")
+
+        matched = None
+        for entry in get_compatible_custom_providers(config):
+            if not isinstance(entry, dict):
+                continue
+            entry_name = str(entry.get("name") or "")
+            provider_key = str(entry.get("provider_key") or "")
+            entry_url = str(entry.get("base_url") or "").rstrip("/")
+            aliases = custom_provider_aliases(entry_name, provider_key)
+            if current_provider.lower() in aliases or (
+                runtime_url and entry_url == runtime_url
+            ):
+                matched = entry
+                break
+
+        is_custom = bool(matched) or current_provider == "custom" or current_provider.startswith("custom:")
+        base_url = runtime_url if is_custom else ""
+        model_name = runtime_model if is_custom else ""
+        api_mode = str(self.api_mode or model_cfg.get("api_mode") or "") if is_custom else ""
+        name = str((matched or {}).get("name") or "")
+        provider_key = str((matched or {}).get("provider_key") or "")
+        if matched:
+            base_url = str(matched.get("base_url") or base_url).rstrip("/")
+            model_name = str(matched.get("model") or model_name)
+            api_mode = str(matched.get("api_mode") or api_mode)
+        if base_url and not name:
+            name = _auto_provider_name(base_url)
+
+        key_env = str((matched or {}).get("key_env") or "")
+        existing_key = get_env_value(key_env) if key_env else ""
+        if not existing_key:
+            existing_key = str((matched or {}).get("api_key") or "")
+
+        storage = "providers" if provider_key or not matched else "custom_providers"
+        return {
+            "base_url": base_url,
+            "original_url": base_url,
+            "model": model_name,
+            "api_mode": api_mode if api_mode in dict(self._CUSTOM_MODEL_API_MODES) else "",
+            "name": name,
+            "provider_key": provider_key,
+            "storage": storage,
+            "key_env": key_env,
+            "existing_api_key": existing_key,
+            "new_api_key": "",
+            "has_new_api_key": False,
+        }
+
+    def _start_custom_model_picker(self) -> None:
+        state = self._model_picker_state
+        if not state:
+            return
+        state["stage"] = "custom_url"
+        state["selected"] = 0
+        state["custom"] = self._build_custom_model_draft()
+        state["error"] = ""
+        self._invalidate(min_interval=0.0)
+
+    @staticmethod
+    def _validate_custom_model_url(value: str) -> str:
+        try:
+            parsed = urlparse(value)
+            _ = parsed.port
+        except ValueError as exc:
+            raise ValueError("The endpoint port is invalid.") from exc
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            raise ValueError("Enter a full http:// or https:// endpoint URL.")
+        if parsed.username or parsed.password:
+            raise ValueError("The endpoint URL cannot contain credentials.")
+        return value.rstrip("/")
+
+    @staticmethod
+    def _merge_custom_model_entry(entry: dict, draft: dict, key_env: str) -> dict:
+        model_name = str(draft["model"])
+        entry.update({
+            "name": str(draft["name"]),
+            "base_url": str(draft["base_url"]),
+            "model": model_name,
+        })
+        entry.pop("api_key", None)
+        entry.pop("api_key_ref", None)
+        if key_env:
+            entry["key_env"] = key_env
+        else:
+            entry.pop("key_env", None)
+        models = entry.get("models")
+        if isinstance(models, dict):
+            models.setdefault(model_name, {})
+        else:
+            entry["models"] = {model_name: {}}
+        return entry
+
+    def _save_custom_model_endpoint(self, draft: dict, persist_global: bool):
+        from hermes_cli.auth import deactivate_provider
+        from hermes_cli.config import (
+            custom_endpoint_key_env,
+            load_config,
+            save_config,
+            save_env_value,
+        )
+        from hermes_cli.inventory import load_picker_context
+        from hermes_cli.model_switch import switch_model
+        from hermes_cli.providers import custom_provider_slug
+
+        base_url = self._validate_custom_model_url(str(draft.get("base_url") or ""))
+        model_name = str(draft.get("model") or "").strip()
+        name = str(draft.get("name") or "").strip()
+        if not model_name:
+            raise ValueError("Model name is required.")
+        if not name:
+            raise ValueError("Provider display name is required.")
+        draft.update(base_url=base_url, model=model_name, name=name)
+
+        api_key = (
+            str(draft.get("new_api_key") or "")
+            if draft.get("has_new_api_key")
+            else str(draft.get("existing_api_key") or "")
+        )
+        key_env = str(draft.get("key_env") or "")
+        provider_key = str(draft.get("provider_key") or "")
+        storage = str(draft.get("storage") or "providers")
+        endpoint_id = provider_key or self._custom_model_endpoint_id(name)
+        if api_key:
+            key_env = key_env or custom_endpoint_key_env(endpoint_id)
+            save_env_value(key_env, api_key)
+
+        config = load_config()
+        if storage == "custom_providers":
+            providers = config.get("custom_providers")
+            providers = providers if isinstance(providers, list) else []
+            original_url = str(draft.get("original_url") or "").rstrip("/")
+            matched = next(
+                (
+                    entry
+                    for entry in providers
+                    if isinstance(entry, dict)
+                    and str(entry.get("base_url") or "").rstrip("/")
+                    in {original_url, base_url}
+                ),
+                None,
+            )
+            if matched is None:
+                matched = {}
+                providers.append(matched)
+            self._merge_custom_model_entry(matched, draft, key_env)
+            api_mode = str(draft.get("api_mode") or "")
+            if api_mode:
+                matched["api_mode"] = api_mode
+            else:
+                matched.pop("api_mode", None)
+            config["custom_providers"] = providers
+            explicit_provider = custom_provider_slug(name)
+        else:
+            providers = config.get("providers")
+            providers = providers if isinstance(providers, dict) else {}
+            entry = providers.get(endpoint_id)
+            entry = dict(entry) if isinstance(entry, dict) else {}
+            self._merge_custom_model_entry(entry, draft, key_env)
+            entry["discover_models"] = bool(entry.get("discover_models", True))
+            api_mode = str(draft.get("api_mode") or "")
+            if api_mode:
+                entry["transport"] = api_mode
+            else:
+                entry.pop("transport", None)
+                entry.pop("api_mode", None)
+            providers[endpoint_id] = entry
+            config["providers"] = providers
+            explicit_provider = endpoint_id
+
+        save_config(config)
+        deactivate_provider()
+        ctx = load_picker_context()
+        result = switch_model(
+            raw_input=model_name,
+            current_provider=self.provider or "",
+            current_model=self.model or "",
+            current_base_url=self.base_url or "",
+            current_api_key=self.api_key or "",
+            is_global=persist_global,
+            explicit_provider=explicit_provider,
+            user_providers=ctx.user_providers,
+            custom_providers=ctx.custom_providers,
+        )
+        return result, ctx.custom_providers
+
+    def _handle_custom_model_picker_selection(
+        self, text: str, persist_global: bool
+    ) -> None:
+        state = self._model_picker_state
+        if not state:
+            return
+        stage = state.get("stage")
+        draft = state.get("custom") or {}
+        state["error"] = ""
+        value = text.strip()
+
+        if stage == "custom_url":
+            try:
+                base_url = self._validate_custom_model_url(
+                    value or str(draft.get("base_url") or "")
+                )
+            except ValueError as exc:
+                state["error"] = str(exc)
+                return
+            draft["base_url"] = base_url
+            parsed = urlparse(base_url)
+            is_loopback = (parsed.hostname or "").lower() in {
+                "localhost", "127.0.0.1", "::1"
+            }
+            state["stage"] = (
+                "custom_http_warning"
+                if parsed.scheme == "http" and not is_loopback
+                else "custom_key"
+            )
+            state["selected"] = 0
+            return
+
+        if stage == "custom_http_warning":
+            state["stage"] = "custom_key" if state.get("selected", 0) == 0 else "custom_url"
+            state["selected"] = 0
+            return
+
+        if stage == "custom_key":
+            if any(char in text for char in ("\0", "\r", "\n")):
+                state["error"] = "API key cannot contain newlines or NUL."
+                return
+            if value:
+                draft["new_api_key"] = value
+                draft["has_new_api_key"] = True
+            state["stage"] = "custom_model"
+            return
+
+        if stage == "custom_model":
+            model_name = value or str(draft.get("model") or "").strip()
+            if not model_name:
+                state["error"] = "Model name is required."
+                return
+            draft["model"] = model_name
+            state["stage"] = "custom_api_mode"
+            state["selected"] = next(
+                (
+                    idx
+                    for idx, (mode, _label) in enumerate(self._CUSTOM_MODEL_API_MODES)
+                    if mode == draft.get("api_mode")
+                ),
+                0,
+            )
+            return
+
+        if stage == "custom_api_mode":
+            selected = min(
+                max(int(state.get("selected", 0)), 0),
+                len(self._CUSTOM_MODEL_API_MODES) - 1,
+            )
+            draft["api_mode"] = self._CUSTOM_MODEL_API_MODES[selected][0]
+            if not draft.get("name"):
+                from hermes_cli.main import _auto_provider_name
+
+                draft["name"] = _auto_provider_name(str(draft.get("base_url") or ""))
+            state["stage"] = "custom_name"
+            return
+
+        if stage == "custom_name":
+            name = value or str(draft.get("name") or "").strip()
+            if not name:
+                state["error"] = "Provider display name is required."
+                return
+            draft["name"] = name
+            try:
+                result, custom_providers = self._save_custom_model_endpoint(
+                    draft, persist_global
+                )
+            except (OSError, RuntimeError, ValueError) as exc:
+                state["error"] = f"Could not save endpoint: {exc}"
+                return
+            self._close_model_picker()
+            if getattr(self, "_app", None):
+                threading.Thread(
+                    target=self._confirm_and_apply_model_switch_result,
+                    args=(result, persist_global, custom_providers),
+                    daemon=True,
+                ).start()
+            else:
+                self._confirm_and_apply_model_switch_result(
+                    result,
+                    persist_global,
+                    custom_providers=custom_providers,
+                )
+
     def _confirm_expensive_model_switch(self, result) -> bool:
         """Ask for explicit confirmation before applying costly model switches."""
         if not getattr(result, "success", False):
@@ -9261,15 +9609,27 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
         else:
             _cprint("    (session only — add --global to persist)")
 
-    def _handle_model_picker_selection(self, persist_global: bool = False) -> None:
+    def _handle_model_picker_selection(
+        self, persist_global: bool = False, text: str = ""
+    ) -> None:
         state = self._model_picker_state
         if not state:
             return
         selected = state.get("selected", 0)
         stage = state.get("stage")
+        if stage in HermesCLI._CUSTOM_MODEL_TEXT_STAGES or stage in {
+            "custom_http_warning",
+            "custom_api_mode",
+        }:
+            self._handle_custom_model_picker_selection(text, persist_global)
+            self._invalidate(min_interval=0.0)
+            return
         if stage == "provider":
             providers = state.get("providers") or []
-            if selected >= len(providers):
+            if selected == len(providers):
+                self._start_custom_model_picker()
+                return
+            if selected >= len(providers) + 1:
                 self._close_model_picker()
                 return
             provider_data = providers[selected]
@@ -9430,16 +9790,6 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
                 )["providers"]
             except Exception:
                 providers = []
-
-            if not providers:
-                _cprint("  No authenticated providers found.")
-                _cprint("")
-                _cprint("  /model <name>                        switch model (persists)")
-                _cprint("  /model <name> --once                 switch for the next turn only")
-                _cprint("  /model <name> --session              switch for this session only")
-                _cprint("  /model --provider <slug>             switch provider")
-                _cprint("  /model --refresh                     re-fetch live model lists")
-                return
 
             self._open_model_picker(
                 providers,
@@ -14888,6 +15238,10 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
             return _state_fragment("class:prompt-working", "⚠")
         if getattr(self, "_slash_confirm_state", None):
             return _state_fragment("class:prompt-working", "⚠")
+        if self._model_picker_secret_input_active():
+            return _state_fragment("class:sudo-prompt", "🔑")
+        if self._model_picker_accepts_text():
+            return _state_fragment("class:clarify-selected", "✎")
         if self._clarify_freetext:
             return _state_fragment("class:clarify-selected", "✎")
         if self._clarify_state:
@@ -15363,12 +15717,14 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
             # --- /model picker modal ---
             if self._model_picker_state:
                 try:
+                    text = event.app.current_buffer.text
                     # Picker selections follow the same session-scoped default
                     # as /model <name>; honour model.persist_switch_by_default.
                     from hermes_cli.model_switch import resolve_persist_behavior
 
                     self._handle_model_picker_selection(
-                        persist_global=resolve_persist_behavior(False, False)
+                        persist_global=resolve_persist_behavior(False, False),
+                        text=text,
                     )
                 except Exception as _exc:
                     _cprint(f"  ✗ Model selection failed: {_exc}")
@@ -15869,19 +16225,35 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
                 event.app.invalidate()
 
         # --- /model picker: arrow-key navigation ---
-        @kb.add('up', filter=Condition(lambda: bool(self._model_picker_state)))
+        @kb.add(
+            'up',
+            filter=Condition(
+                lambda: bool(self._model_picker_state)
+                and not self._model_picker_accepts_text()
+            ),
+        )
         def model_picker_up(event):
             if self._model_picker_state:
                 self._model_picker_state["selected"] = max(0, self._model_picker_state.get("selected", 0) - 1)
                 event.app.invalidate()
 
-        @kb.add('down', filter=Condition(lambda: bool(self._model_picker_state)))
+        @kb.add(
+            'down',
+            filter=Condition(
+                lambda: bool(self._model_picker_state)
+                and not self._model_picker_accepts_text()
+            ),
+        )
         def model_picker_down(event):
             state = self._model_picker_state
             if not state:
                 return
             if state.get("stage") == "provider":
-                max_idx = len(state.get("providers") or [])
+                max_idx = len(state.get("providers") or []) + 1
+            elif state.get("stage") == "custom_api_mode":
+                max_idx = len(self._CUSTOM_MODEL_API_MODES) - 1
+            elif state.get("stage") == "custom_http_warning":
+                max_idx = 1
             else:
                 max_idx = len(state.get("model_list") or []) + 1
             state["selected"] = min(max_idx, state.get("selected", 0) + 1)
@@ -16349,6 +16721,12 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
             pasted_text = pasted_text.replace('\r\n', '\n').replace('\r', '\n')
             pasted_text = _strip_leaked_bracketed_paste_wrappers(pasted_text)
             pasted_text, _had_mouse_reports = _strip_leaked_terminal_responses_with_meta(pasted_text)
+            if self._model_picker_secret_input_active():
+                if pasted_text:
+                    from run_agent import _sanitize_surrogates
+
+                    event.current_buffer.insert_text(_sanitize_surrogates(pasted_text))
+                return
             if _had_mouse_reports:
                 self._recover_terminal_input_modes(reason="mouse reports leaked into bracketed paste payload")
             if _should_auto_attach_clipboard_image_on_paste(pasted_text) and self._try_attach_clipboard_image():
@@ -16519,6 +16897,10 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
                 _prev_text_len[0] = len(text)
                 _prev_newline_count[0] = text.count('\n')
                 return
+            if self._model_picker_secret_input_active():
+                _prev_text_len[0] = len(text)
+                _prev_newline_count[0] = text.count('\n')
+                return
             chars_added = len(text) - _prev_text_len[0]
             _prev_text_len[0] = len(text)
             if _paste_just_collapsed[0] or self._skip_paste_collapse:
@@ -16554,7 +16936,9 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
             ConditionalProcessor(
                 PasswordProcessor(),
                 filter=Condition(
-                    lambda: bool(cli_ref._sudo_state) or bool(cli_ref._secret_state)
+                    lambda: bool(cli_ref._sudo_state)
+                    or bool(cli_ref._secret_state)
+                    or cli_ref._model_picker_secret_input_active()
                 ),
             )
         )
@@ -16586,6 +16970,8 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
                 return ""
             if cli_ref._slash_confirm_state:
                 return "type 1/2/3, or use ↑/↓ then Enter"
+            if cli_ref._model_picker_accepts_text():
+                return cli_ref._model_picker_input_placeholder()
             if cli_ref._clarify_freetext:
                 return "type your answer here and press Enter"
             if cli_ref._clarify_state:
@@ -16644,6 +17030,11 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
                     ('class:clarify-countdown', f'  ({remaining}s)'),
                 ]
 
+            if cli_ref._model_picker_state:
+                if cli_ref._model_picker_accepts_text():
+                    return [('class:hint', '  type a value, Enter to continue · ESC to cancel')]
+                return [('class:hint', '  ↑/↓ to select, Enter to confirm · ESC to cancel')]
+
             if cli_ref._clarify_state:
                 # None deadline = unlimited wait → hide the countdown entirely.
                 if cli_ref._clarify_deadline is None:
@@ -16671,7 +17062,15 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
             return []
 
         def get_hint_height():
-            if cli_ref._sudo_state or cli_ref._secret_state or cli_ref._approval_state or cli_ref._slash_confirm_state or cli_ref._clarify_state or cli_ref._command_running:
+            if any((
+                cli_ref._sudo_state,
+                cli_ref._secret_state,
+                cli_ref._approval_state,
+                cli_ref._slash_confirm_state,
+                cli_ref._model_picker_state,
+                cli_ref._clarify_state,
+                cli_ref._command_running,
+            )):
                 return 1
             # Keep a spacer while the agent runs on roomy terminals, but reclaim
             # the row on narrow/mobile screens where every line matters.
@@ -17057,6 +17456,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
             if not state:
                 return []
             stage = state.get("stage", "provider")
+            selected = state.get("selected", 0)
             if stage == "provider":
                 title = "⚙ Model Picker — Select Provider"
                 choices = []
@@ -17067,9 +17467,10 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
                     if p.get("is_current"):
                         label += "  ← current"
                     choices.append(label)
+                choices.append("＋ Add or edit custom endpoint")
                 choices.append("Cancel")
                 hint = f"Current: {state.get('current_model', 'unknown')} on {state.get('current_provider', 'unknown')}"
-            else:
+            elif stage == "model":
                 provider_data = state.get("provider_data") or {}
                 model_list = state.get("model_list") or []
                 title = f"⚙ Model Picker — {provider_data.get('name', provider_data.get('slug', 'Provider'))}"
@@ -17078,10 +17479,35 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
                     hint = f"Select a model ({len(model_list)} available)"
                 else:
                     hint = "No models listed for this provider. Use Back or Cancel."
+            else:
+                title = "⚙ Model Picker — Custom Endpoint"
+                draft = state.get("custom") or {}
+                error = str(state.get("error") or "")
+                if stage == "custom_http_warning":
+                    choices = ["Continue with plaintext HTTP", "← Edit URL"]
+                    hint = "Warning: a remote HTTP endpoint can expose the API key and prompts."
+                elif stage == "custom_api_mode":
+                    choices = [label for _mode, label in cli_ref._CUSTOM_MODEL_API_MODES]
+                    hint = "Step 4/5 · Select the endpoint API protocol"
+                else:
+                    step = {
+                        "custom_url": ("Step 1/5", "API URL", draft.get("base_url") or "not set"),
+                        "custom_key": (
+                            "Step 2/5",
+                            "API key",
+                            "configured (hidden)" if draft.get("existing_api_key") else "not configured (optional)",
+                        ),
+                        "custom_model": ("Step 3/5", "Model", draft.get("model") or "not set"),
+                        "custom_name": ("Step 5/5", "Display name", draft.get("name") or "auto-generated"),
+                    }.get(stage, ("Custom endpoint", "Value", ""))
+                    hint = f"{step[0]} · Type in the composer and press Enter"
+                    choices = [f"{step[1]}: {step[2]}"]
+                    selected = -1
+                if error:
+                    choices.append(f"Error: {error}")
 
             box_width = _panel_box_width(title, [hint] + choices, min_width=46, max_width=84)
             inner_text_width = max(8, box_width - 6)
-            selected = state.get("selected", 0)
 
             # Scrolling viewport: the panel renders into a Window with no max
             # height, so without limiting visible items the bottom border and
