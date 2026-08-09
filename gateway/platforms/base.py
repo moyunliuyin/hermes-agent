@@ -5685,7 +5685,9 @@ class BasePlatformAdapter(ABC):
             return
 
         allow_rescue = False
-        if os.getenv("GATEWAY_RESCUE_SECRET_HASH", "").strip():
+        from gateway.rescue import rescue_phrase_configured
+
+        if rescue_phrase_configured():
             runner = getattr(self, "gateway_runner", None)
             try:
                 allow_rescue = bool(

@@ -25,14 +25,27 @@ _SCRYPT_DKLEN = 32
 _MAX_PHRASE_CHARS = 256
 
 
+def _rescue_secret_hash() -> str:
+    """Read the verifier from the active profile's isolated secret scope."""
+    try:
+        from agent.secret_scope import UnscopedSecretError, get_secret
+
+        try:
+            return (get_secret(RESCUE_SECRET_HASH_ENV) or "").strip()
+        except UnscopedSecretError:
+            return ""
+    except ImportError:
+        return os.getenv(RESCUE_SECRET_HASH_ENV, "").strip()
+
+
 def rescue_phrase_configured() -> bool:
     """Return whether a rescue phrase hash is configured."""
-    return bool(os.getenv(RESCUE_SECRET_HASH_ENV, "").strip())
+    return bool(_rescue_secret_hash())
 
 
 def verify_rescue_phrase(phrase: str) -> bool:
     """Verify *phrase* against the configured, bounded scrypt hash."""
-    encoded = os.getenv(RESCUE_SECRET_HASH_ENV, "").strip()
+    encoded = _rescue_secret_hash()
     if not encoded or not isinstance(phrase, str) or len(phrase) > _MAX_PHRASE_CHARS:
         return False
 

@@ -65,6 +65,17 @@ def test_rescue_hash_verification_is_exact_and_case_sensitive(configured_rescue)
     assert not verify_rescue_phrase(f"{_TEST_PHRASE}x")
 
 
+def test_rescue_hash_reads_active_profile_secret_scope(monkeypatch, rescue_hash):
+    from agent.secret_scope import reset_secret_scope, set_secret_scope
+
+    monkeypatch.delenv("GATEWAY_RESCUE_SECRET_HASH", raising=False)
+    token = set_secret_scope({"GATEWAY_RESCUE_SECRET_HASH": rescue_hash})
+    try:
+        assert verify_rescue_phrase(_TEST_PHRASE)
+    finally:
+        reset_secret_scope(token)
+
+
 def test_rescue_hash_rejects_unbounded_scrypt_parameters(monkeypatch, rescue_hash):
     parts = rescue_hash.split("$")
     parts[1] = str(2**20)
