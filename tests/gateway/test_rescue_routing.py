@@ -76,6 +76,34 @@ def test_rescue_hash_reads_active_profile_secret_scope(monkeypatch, rescue_hash)
         reset_secret_scope(token)
 
 
+def test_unscoped_primary_adapter_reads_default_profile_hash(
+    monkeypatch, rescue_hash, tmp_path
+):
+    from agent.secret_scope import (
+        is_multiplex_active,
+        reset_secret_scope,
+        set_multiplex_active,
+        set_secret_scope,
+    )
+    from gateway import rescue
+
+    (tmp_path / ".env").write_text(
+        f"GATEWAY_RESCUE_SECRET_HASH={rescue_hash}\n", encoding="utf-8"
+    )
+    monkeypatch.setattr("hermes_constants.get_hermes_home", lambda: tmp_path)
+    monkeypatch.delenv("GATEWAY_RESCUE_SECRET_HASH", raising=False)
+    rescue._default_profile_rescue_hash.cache_clear()
+    was_multiplex = is_multiplex_active()
+    token = set_secret_scope(None)
+    set_multiplex_active(True)
+    try:
+        assert verify_rescue_phrase(_TEST_PHRASE)
+    finally:
+        set_multiplex_active(was_multiplex)
+        reset_secret_scope(token)
+        rescue._default_profile_rescue_hash.cache_clear()
+
+
 def test_rescue_hash_rejects_unbounded_scrypt_parameters(monkeypatch, rescue_hash):
     parts = rescue_hash.split("$")
     parts[1] = str(2**20)

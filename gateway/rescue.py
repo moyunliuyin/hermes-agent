@@ -11,6 +11,7 @@ import base64
 import hashlib
 import hmac
 import os
+from functools import lru_cache
 
 
 RESCUE_SECRET_HASH_ENV = "GATEWAY_RESCUE_SECRET_HASH"
@@ -25,6 +26,19 @@ _SCRYPT_DKLEN = 32
 _MAX_PHRASE_CHARS = 256
 
 
+@lru_cache(maxsize=1)
+def _default_profile_rescue_hash() -> str:
+    """Load the process-wide verifier for an unscoped primary adapter task."""
+    try:
+        from agent.secret_scope import load_env_file
+        from hermes_constants import get_hermes_home
+
+        values = load_env_file(get_hermes_home() / ".env")
+        return values.get(RESCUE_SECRET_HASH_ENV, "").strip()
+    except Exception:
+        return ""
+
+
 def _rescue_secret_hash() -> str:
     """Read the verifier from the active profile's isolated secret scope."""
     try:
@@ -33,7 +47,7 @@ def _rescue_secret_hash() -> str:
         try:
             return (get_secret(RESCUE_SECRET_HASH_ENV) or "").strip()
         except UnscopedSecretError:
-            return ""
+            return _default_profile_rescue_hash()
     except ImportError:
         return os.getenv(RESCUE_SECRET_HASH_ENV, "").strip()
 
