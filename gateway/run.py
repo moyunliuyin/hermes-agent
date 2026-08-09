@@ -14376,6 +14376,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 "help": self._handle_help_command,
                 "commands": self._handle_commands_command,
                 "profile": self._handle_profile_command,
+                "rescue": self._handle_rescue_command,
                 "update": self._handle_update_command,
                 "version": self._handle_version_command,
             }.get(name)
@@ -15418,6 +15419,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         
         if canonical == "profile":
             return await self._handle_profile_command(event)
+
+        if canonical == "rescue":
+            return await self._handle_rescue_command(event)
 
         if canonical == "whoami":
             return await self._handle_whoami_command(event)
@@ -24805,6 +24809,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         config = getattr(self, "config", None)
         if not getattr(config, "multiplex_profiles", False):
             return None
+
+        rescue_profile = self._active_rescue_profile_for_source(source)
+        if isinstance(rescue_profile, str) and rescue_profile:
+            return rescue_profile
+
         routes = getattr(config, "profile_routes", None)
         if not routes:
             return None

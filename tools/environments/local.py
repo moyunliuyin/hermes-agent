@@ -306,6 +306,7 @@ def _build_provider_env_blocklist() -> frozenset:
         "EMAIL_HOME_ADDRESS_NAME",
         "HERMES_DASHBOARD_SESSION_TOKEN",
         "GATEWAY_ALLOWED_USERS",
+        "GATEWAY_RESCUE_SECRET_HASH",
         "GH_TOKEN",
         "GITHUB_APP_ID",
         "GITHUB_APP_PRIVATE_KEY_PATH",
@@ -369,6 +370,9 @@ def _is_hermes_internal_secret(key: str) -> bool:
       ``_ALWAYS_STRIP_KEYS``. Non-secret ``GATEWAY_RELAY_*`` routing hints
       (``GATEWAY_RELAY_URL``, ``GATEWAY_RELAY_PLATFORMS``, …) are NOT matched
       and remain visible.
+    - ``GATEWAY_RESCUE_SECRET_HASH`` — the scrypt verifier for the Telegram
+      private-DM rescue route. The plaintext phrase is never persisted, and
+      the verifier is gateway-only authentication material.
 
     ``code_execution_tool.py`` already catches these via substring matching on
     ``KEY`` / ``SECRET`` / ``TOKEN``; the terminal backend's narrower name-based
@@ -390,6 +394,8 @@ def _is_hermes_internal_secret(key: str) -> bool:
     if upper.startswith("GATEWAY_RELAY_") and (
         upper.endswith("_SECRET") or upper.endswith("_KEY") or upper.endswith("_TOKEN")
     ):
+        return True
+    if upper == "GATEWAY_RESCUE_SECRET_HASH":
         return True
     return False
 
@@ -551,6 +557,7 @@ _ALWAYS_STRIP_KEYS: frozenset[str] = frozenset({
     "SLACK_SIGNING_SECRET",
     "GATEWAY_ALLOWED_USERS",
     "GATEWAY_ALLOW_ALL_USERS",
+    "GATEWAY_RESCUE_SECRET_HASH",
     # Gateway relay auth — the ID/secret/delivery-key triplet the gateway
     # provisions and persists to the 0600 .env. Stripped unconditionally on
     # EVERY spawn surface (terminal + model-driving CLIs) so it can't drift

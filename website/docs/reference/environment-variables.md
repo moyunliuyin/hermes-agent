@@ -302,6 +302,7 @@ These are set automatically by the Docker terminal backend when `proxy.enabled: 
 |----------|-------------|
 | `TELEGRAM_BOT_TOKEN` | Telegram bot token (from @BotFather) |
 | `TELEGRAM_ALLOWED_USERS` | Comma-separated user IDs allowed to use the bot (applies to DMs, groups, and forums) |
+| `GATEWAY_RESCUE_SECRET_HASH` | Bounded scrypt hash for the authorized Telegram-DM rescue phrase. A match routes that DM to the `default` profile for 15 minutes; `/rescue status` reports it and `/rescue off` exits. Store only the hash, never the plaintext phrase. |
 | `TELEGRAM_ALLOW_ALL_USERS` | Allow any Telegram user to trigger the bot (dev only). |
 | `TELEGRAM_GROUP_ALLOWED_USERS` | Comma-separated sender user IDs authorized in groups/forums only (does NOT grant DM access). Chat-ID-shaped values (starting with `-`) are still honored as chat IDs for backward compat with pre-#17686 configs, with a deprecation warning. |
 | `TELEGRAM_GROUP_ALLOWED_CHATS` | Comma-separated group/forum chat IDs; any member is authorized |
@@ -534,6 +535,10 @@ These are set automatically by the Docker terminal backend when `proxy.enabled: 
 | `MESSAGING_CWD` | Deprecated compatibility fallback for gateway working directory. Prefer `terminal.cwd` in `config.yaml`. |
 | `GATEWAY_ALLOWED_USERS` | Comma-separated user IDs allowed across all platforms |
 | `GATEWAY_ALLOW_ALL_USERS` | Allow all users without allowlists (`true`/`false`, default: `false`) |
+
+### Telegram rescue route
+
+The rescue phrase is a routing control, not a replacement for Telegram authorization. Hermes checks the sender against the existing Telegram allowlist before performing the bounded scrypt verification, accepts the phrase only as an exact case-sensitive private-DM message (surrounding whitespace is ignored), and never enables it in groups. A successful match keeps dangerous-command approvals in force and stores only an in-memory 15-minute deadline for that chat; a gateway restart or `/rescue off` clears the override. Keep the `GATEWAY_RESCUE_SECRET_HASH` verifier in the mode-`0600` Hermes `.env` file and rotate it if the phrase is disclosed.
 
 ### Web Dashboard & Hermes Desktop
 

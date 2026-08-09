@@ -240,6 +240,7 @@ description: "Hermes Agent 使用的所有环境变量完整参考"
 |----------|-------------|
 | `TELEGRAM_BOT_TOKEN` | Telegram bot token（来自 @BotFather） |
 | `TELEGRAM_ALLOWED_USERS` | 允许使用 bot 的逗号分隔用户 ID（适用于私聊、群组和论坛） |
+| `GATEWAY_RESCUE_SECRET_HASH` | 已授权 Telegram 私聊所用救援暗语的受限 scrypt 哈希。匹配后，该私聊会临时路由到 `default` profile 15 分钟；`/rescue status` 查看状态，`/rescue off` 退出。只保存哈希，不保存暗语明文。 |
 | `TELEGRAM_GROUP_ALLOWED_USERS` | 仅在群组/论坛中授权的逗号分隔发送者用户 ID（**不**授予私聊权限）。以 `-` 开头的聊天 ID 形式值仍作为聊天 ID 处理，以向后兼容 #17686 之前的配置，并显示弃用警告。 |
 | `TELEGRAM_GROUP_ALLOWED_CHATS` | 逗号分隔的群组/论坛聊天 ID；任意成员均可授权 |
 | `TELEGRAM_HOME_CHANNEL` | cron 投递的默认 Telegram 聊天/频道 |
@@ -419,6 +420,10 @@ description: "Hermes Agent 使用的所有环境变量完整参考"
 | `MESSAGING_CWD` | 消息模式下终端命令的工作目录（默认：`~`） |
 | `GATEWAY_ALLOWED_USERS` | 跨所有平台允许的逗号分隔用户 ID |
 | `GATEWAY_ALLOW_ALL_USERS` | 无需白名单允许所有用户（`true`/`false`，默认：`false`） |
+
+### Telegram 救援路由
+
+救援暗语只是路由控制，并不能替代 Telegram 授权。Hermes 会先用现有 Telegram 白名单校验发送者，再执行参数受限的 scrypt 校验；暗语只接受大小写敏感的私聊精确消息（忽略首尾空白），群聊中永不启用。匹配成功后，危险命令审批仍然有效，系统只在内存中保存该私聊 15 分钟的截止时间；Gateway 重启或执行 `/rescue off` 都会清除临时路由。请将 `GATEWAY_RESCUE_SECRET_HASH` 校验值保存在权限为 `0600` 的 Hermes `.env` 中；暗语泄露后应立即轮换。
 
 ### Microsoft Graph（Teams 会议）
 

@@ -103,6 +103,114 @@ class GatewaySlashCommandsMixin:
 
     async_session_store: AsyncSessionStore
 
+    @staticmethod
+    def _rescue_route_key(source: SessionSource) -> Optional[tuple[str, str]]:
+        if (
+            getattr(source, "platform", None) != Platform.TELEGRAM
+            or getattr(source, "chat_type", None) != "dm"
+        ):
+            return None
+        chat_id = _clean_str(getattr(source, "chat_id", None))
+        return (Platform.TELEGRAM.value, chat_id) if chat_id else None
+
+    def _rescue_deadlines(self) -> dict[tuple[str, str], float]:
+        deadlines = self.__dict__.get("_gateway_rescue_deadlines")
+        if deadlines is None:
+            deadlines = {}
+            self.__dict__["_gateway_rescue_deadlines"] = deadlines
+        return deadlines
+
+    def _active_rescue_profile_for_source(
+        self, source: SessionSource, *, now: Optional[float] = None
+    ) -> Optional[str]:
+        """Return the temporary rescue profile for a Telegram DM, if active."""
+        from gateway.rescue import RESCUE_PROFILE
+
+        key = self._rescue_route_key(source)
+        if key is None:
+            return None
+        deadlines = self._rescue_deadlines()
+        deadline = deadlines.get(key)
+        current = time.monotonic() if now is None else now
+        if deadline is None:
+            return None
+        if deadline <= current:
+            deadlines.pop(key, None)
+            return None
+        return RESCUE_PROFILE
+
+    def _rescue_status_text(self, key: tuple[str, str]) -> str:
+        from gateway.rescue import RESCUE_PROFILE
+
+        deadlines = self._rescue_deadlines()
+        deadline = deadlines.get(key)
+        remaining = (deadline - time.monotonic()) if deadline is not None else 0
+        if remaining <= 0:
+            deadlines.pop(key, None)
+            return "Rescue mode is not active."
+        return (
+            f"Rescue mode is active on profile `{RESCUE_PROFILE}` "
+            f"for another {max(1, int(remaining + 0.999))} seconds."
+        )
+
+    def _disable_rescue(self, key: tuple[str, str], source: SessionSource) -> str:
+        was_active = self._rescue_deadlines().pop(key, None) is not None
+        logger.info(
+            "Telegram rescue mode disabled (user=%s chat=%s)",
+            source.user_id,
+            source.chat_id,
+        )
+        return (
+            "Rescue mode disabled. New messages route normally."
+            if was_active
+            else "Rescue mode is not active."
+        )
+
+    async def _handle_rescue_command(self, event: MessageEvent) -> str:
+        """Handle the Telegram DM rescue phrase and its status/off controls."""
+        from gateway.rescue import (
+            RESCUE_PROFILE,
+            RESCUE_TTL_SECONDS,
+            rescue_phrase_configured,
+            verify_rescue_phrase,
+        )
+
+        source = event.source
+        key = self._rescue_route_key(source)
+        if key is None:
+            return "Rescue mode is available only in Telegram private chats."
+        if not getattr(getattr(self, "config", None), "multiplex_profiles", False):
+            return "Rescue mode requires gateway.multiplex_profiles to be enabled."
+
+        args = (event.get_command_args() or "").strip()
+        action = args.lower()
+        if action == "off":
+            return self._disable_rescue(key, source)
+        if action == "status":
+            return self._rescue_status_text(key)
+
+        if not rescue_phrase_configured():
+            return "Rescue mode is not configured on this gateway."
+        verified = bool(getattr(event, "_gateway_rescue_verified", False))
+        if not verified and args:
+            verified = verify_rescue_phrase(args)
+        if not verified:
+            return "Invalid rescue phrase."
+
+        self._rescue_deadlines()[key] = time.monotonic() + RESCUE_TTL_SECONDS
+        logger.info(
+            "Telegram rescue mode enabled (user=%s chat=%s profile=%s ttl=%ss)",
+            source.user_id,
+            source.chat_id,
+            RESCUE_PROFILE,
+            RESCUE_TTL_SECONDS,
+        )
+        return (
+            f"Rescue mode enabled. New messages route to `{RESCUE_PROFILE}` "
+            f"for {RESCUE_TTL_SECONDS // 60} minutes. Dangerous-command "
+            "approvals remain enabled. Use `/rescue off` to exit."
+        )
+
     def _typed_command_prefix_for(self, platform) -> str:
         """Return the prefix users can always type to reach Hermes commands.
 

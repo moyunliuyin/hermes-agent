@@ -1,0 +1,59 @@
+"""Telegram DM rescue-phrase verification.
+
+The phrase itself never lives in configuration. Operators store a scrypt hash
+in ``GATEWAY_RESCUE_SECRET_HASH``; the gateway verifies it locally before
+turning the plaintext message into the ``/rescue`` control command.
+"""
+
+from __future__ import annotations
+
+import base64
+import hashlib
+import hmac
+import os
+
+
+RESCUE_SECRET_HASH_ENV = "GATEWAY_RESCUE_SECRET_HASH"
+RESCUE_PROFILE = "default"
+RESCUE_TTL_SECONDS = 15 * 60
+
+_SCRYPT_N = 2**14
+_SCRYPT_R = 8
+_SCRYPT_P = 1
+_SCRYPT_SALT_BYTES = 16
+_SCRYPT_DKLEN = 32
+_MAX_PHRASE_CHARS = 256
+
+
+def rescue_phrase_configured() -> bool:
+    """Return whether a rescue phrase hash is configured."""
+    return bool(os.getenv(RESCUE_SECRET_HASH_ENV, "").strip())
+
+
+def verify_rescue_phrase(phrase: str) -> bool:
+    """Verify *phrase* against the configured, bounded scrypt hash."""
+    encoded = os.getenv(RESCUE_SECRET_HASH_ENV, "").strip()
+    if not encoded or not isinstance(phrase, str) or len(phrase) > _MAX_PHRASE_CHARS:
+        return False
+
+    try:
+        scheme, n_s, r_s, p_s, salt_b64, expected_b64 = encoded.split("$")
+        n, r, p = int(n_s), int(r_s), int(p_s)
+        if (scheme, n, r, p) != ("scrypt", _SCRYPT_N, _SCRYPT_R, _SCRYPT_P):
+            return False
+        salt = base64.b64decode(salt_b64, validate=True)
+        expected = base64.b64decode(expected_b64, validate=True)
+        if len(salt) != _SCRYPT_SALT_BYTES or len(expected) != _SCRYPT_DKLEN:
+            return False
+        actual = hashlib.scrypt(
+            phrase.encode("utf-8"),
+            salt=salt,
+            n=n,
+            r=r,
+            p=p,
+            dklen=len(expected),
+            maxmem=0,
+        )
+    except (TypeError, ValueError, MemoryError):
+        return False
+    return hmac.compare_digest(actual, expected)

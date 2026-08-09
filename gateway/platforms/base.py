@@ -2194,7 +2194,9 @@ _PLAINTEXT_GATEWAY_RESTART_PATTERNS: tuple[re.Pattern[str], ...] = (
 )
 
 
-def coerce_plaintext_gateway_command(event: "MessageEvent") -> None:
+def coerce_plaintext_gateway_command(
+    event: "MessageEvent", *, allow_rescue: bool = False
+) -> None:
     """Rewrite a tiny set of DM plaintext admin phrases into slash commands.
 
     This keeps high-impact operational phrases like ``restart gateway`` out of
@@ -2202,8 +2204,10 @@ def coerce_plaintext_gateway_command(event: "MessageEvent") -> None:
     currently running agent and leave the gateway stuck in ``draining`` while it
     waits for that same agent to finish.
 
-    Scope is intentionally narrow: DM text messages only, exact restart-style
-    phrases only. Group chats keep natural-language semantics.
+    Scope is intentionally narrow: DM text messages only. Restart-style
+    phrases keep their existing behavior. An authorized Telegram DM may also
+    present the locally configured rescue phrase; on a match the event is
+    marked with a process-local trust bit and rewritten to ``/rescue``.
     """
     try:
         if event is None or event.message_type != MessageType.TEXT:
@@ -2214,6 +2218,13 @@ def coerce_plaintext_gateway_command(event: "MessageEvent") -> None:
         source = getattr(event, "source", None)
         if getattr(source, "chat_type", None) != "dm":
             return
+        if allow_rescue and getattr(source, "platform", None) == Platform.TELEGRAM:
+            from gateway.rescue import verify_rescue_phrase
+
+            if verify_rescue_phrase(text):
+                event.text = "/rescue"
+                event._gateway_rescue_verified = True
+                return
         for pattern in _PLAINTEXT_GATEWAY_RESTART_PATTERNS:
             if pattern.match(text):
                 event.text = "/restart"
@@ -5673,7 +5684,16 @@ class BasePlatformAdapter(ABC):
         if not self._message_handler:
             return
 
-        coerce_plaintext_gateway_command(event)
+        allow_rescue = False
+        if os.getenv("GATEWAY_RESCUE_SECRET_HASH", "").strip():
+            runner = getattr(self, "gateway_runner", None)
+            try:
+                allow_rescue = bool(
+                    runner is not None and runner._is_user_authorized(event.source)
+                )
+            except Exception:
+                allow_rescue = False
+        coerce_plaintext_gateway_command(event, allow_rescue=allow_rescue)
 
         # Telegram topic recovery only applies to private DM topic lanes. Do
         # not submit a no-op check for group/forum/channel traffic to the
