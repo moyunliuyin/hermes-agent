@@ -2793,19 +2793,25 @@ def list_authenticated_providers(
         )
     ):
         _models = [current_model] if current_model else []
-        if refresh or probe_current_custom_provider:
-            try:
-                from hermes_cli.models import cached_fetch_api_models
+        try:
+            from hermes_cli.models import _get_model_config_dict, cached_fetch_api_models
 
-                _live_models = cached_fetch_api_models(
-                    "",
-                    str(current_base_url).strip().rstrip("/"),
-                    timeout=1.5 if for_picker else 5.0,  # picker: fail fast on a slow current endpoint
-                )
-                if _live_models:
-                    _models = _live_models
-            except Exception:
-                pass
+            _model_cfg = _get_model_config_dict()
+            _api_key = (
+                str(_model_cfg.get("api_key", "") or "").strip()
+                or os.getenv("CUSTOM_API_KEY", "")
+                or os.getenv("OPENAI_API_KEY", "")
+                or os.getenv("OPENROUTER_API_KEY", "")
+            )
+            _live_models = cached_fetch_api_models(
+                _api_key,
+                str(current_base_url).strip().rstrip("/"),
+                timeout=1.5 if for_picker else 5.0,  # picker: fail fast on a slow current endpoint
+            )
+            if _live_models:
+                _models = _live_models
+        except Exception:
+            pass
         results.append({
             "slug": "custom",
             "name": "Custom endpoint",
