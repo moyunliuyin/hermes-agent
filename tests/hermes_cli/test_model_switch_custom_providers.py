@@ -13,6 +13,7 @@ import yaml
 from hermes_cli.model_switch import (
     _save_discovered_models_to_config,
     list_authenticated_providers,
+    list_picker_providers,
     switch_model,
 )
 from hermes_cli.providers import resolve_provider_full
@@ -211,6 +212,53 @@ def test_list_authenticated_providers_can_probe_active_bare_custom_endpoint(monk
     assert bare_custom["models"] == ["gpt-4o", "gpt-4o-mini"]
 
 
+def test_picker_includes_configured_bare_custom_when_current_provider_differs(
+    monkeypatch,
+):
+    """A stale session provider must not hide the imported custom endpoint."""
+    monkeypatch.setattr("agent.models_dev.fetch_models_dev", lambda: {})
+    monkeypatch.setattr(providers_mod, "HERMES_OVERLAYS", {})
+    monkeypatch.setattr(
+        "hermes_cli.models._get_model_config_dict",
+        lambda: {
+            "provider": "custom",
+            "default": "42",
+            "base_url": "https://custom.example/v1",
+            "api_key": "configured-key",
+        },
+    )
+    probe_calls = []
+
+    def _probe(api_key, api_url, **kwargs):
+        probe_calls.append((api_key, api_url, kwargs))
+        return ["auto", "42"]
+
+    monkeypatch.setattr("hermes_cli.models.cached_fetch_api_models", _probe)
+
+    providers = list_picker_providers(
+        current_provider="moa",
+        current_base_url="moa://local",
+        current_model="default",
+        user_providers={},
+        custom_providers=[],
+        max_models=50,
+        include_moa=True,
+    )
+
+    custom_rows = [p for p in providers if p["slug"] == "custom"]
+    assert len(custom_rows) == 1
+    assert custom_rows[0]["api_url"] == "https://custom.example/v1"
+    assert custom_rows[0]["models"] == ["auto", "42"]
+    assert custom_rows[0]["is_current"] is False
+    assert probe_calls == [
+        (
+            "configured-key",
+            "https://custom.example/v1",
+            {"timeout": 1.5},
+        )
+    ]
+
+
 def test_switch_model_accepts_explicit_bare_custom_current_endpoint(monkeypatch):
     """Picker selections for bare custom endpoints should route to current base_url."""
     monkeypatch.setattr("hermes_cli.models.validate_requested_model", lambda *a, **k: _MOCK_VALIDATION)
@@ -234,6 +282,83 @@ def test_switch_model_accepts_explicit_bare_custom_current_endpoint(monkeypatch)
     assert result.new_model == "gpt-4o-mini"
     assert result.base_url == "https://www.ccsub.net/v1"
     assert result.api_key == "sk-test"
+
+
+def test_switch_model_explicit_bare_custom_uses_config_not_stale_session(
+    monkeypatch,
+):
+    """Explicit custom imports model.base_url/key when the session is not custom."""
+    monkeypatch.setattr(
+        "hermes_cli.models._get_model_config_dict",
+        lambda: {
+            "provider": "custom",
+            "default": "42",
+            "base_url": "https://custom.example/v1",
+            "api_key": "configured-key",
+        },
+    )
+    monkeypatch.setattr(
+        "hermes_cli.models.validate_requested_model",
+        lambda *a, **k: _MOCK_VALIDATION,
+    )
+    monkeypatch.setattr("hermes_cli.model_switch.get_model_info", lambda *a, **k: None)
+    monkeypatch.setattr(
+        "hermes_cli.model_switch.get_model_capabilities", lambda *a, **k: None
+    )
+
+    result = switch_model(
+        raw_input="42",
+        current_provider="moa",
+        current_model="default",
+        current_base_url="moa://local",
+        current_api_key="",
+        explicit_provider="custom",
+        user_providers={},
+        custom_providers=[],
+    )
+
+    assert result.success is True
+    assert result.target_provider == "custom"
+    assert result.base_url == "https://custom.example/v1"
+    assert result.api_key == "configured-key"
+
+
+@pytest.mark.parametrize("current_provider", ["custom", "local", "custom:relay"])
+def test_switch_model_explicit_bare_custom_continues_current_endpoint(
+    monkeypatch, current_provider
+):
+    """An active custom session keeps its endpoint instead of re-importing config."""
+    monkeypatch.setattr(
+        "hermes_cli.models._get_model_config_dict",
+        lambda: {
+            "provider": "custom",
+            "base_url": "https://other.example/v1",
+            "api_key": "other-key",
+        },
+    )
+    monkeypatch.setattr(
+        "hermes_cli.models.validate_requested_model",
+        lambda *a, **k: _MOCK_VALIDATION,
+    )
+    monkeypatch.setattr("hermes_cli.model_switch.get_model_info", lambda *a, **k: None)
+    monkeypatch.setattr(
+        "hermes_cli.model_switch.get_model_capabilities", lambda *a, **k: None
+    )
+
+    result = switch_model(
+        raw_input="42",
+        current_provider=current_provider,
+        current_model="auto",
+        current_base_url="https://current.example/v1",
+        current_api_key="current-key",
+        explicit_provider="custom",
+        user_providers={},
+        custom_providers=[],
+    )
+
+    assert result.success is True
+    assert result.base_url == "https://current.example/v1"
+    assert result.api_key == "current-key"
 
 
 def test_is_aggregator_recognizes_named_custom_provider():

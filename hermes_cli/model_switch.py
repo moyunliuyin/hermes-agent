@@ -199,6 +199,31 @@ def _bare_custom_provider_def(current_base_url: str) -> Optional[ProviderDef]:
     )
 
 
+def _configured_bare_custom_credentials() -> tuple[str, str]:
+    """Return the direct custom endpoint credentials from ``model:`` config."""
+    import os
+
+    try:
+        from hermes_cli.models import _get_custom_base_url, _get_model_config_dict
+
+        model_cfg = _get_model_config_dict()
+        api_key = (
+            str(model_cfg.get("api_key", "") or "").strip()
+            or os.getenv("CUSTOM_API_KEY", "")
+            or os.getenv("OPENAI_API_KEY", "")
+            or os.getenv("OPENROUTER_API_KEY", "")
+        )
+        return _get_custom_base_url(), api_key
+    except Exception:
+        return "", ""
+
+
+def _continues_custom_endpoint(provider: str) -> bool:
+    """Whether a switch should keep the session's current custom endpoint."""
+    normalized = str(provider or "").strip().lower()
+    return normalized in {"custom", "local"} or normalized.startswith("custom:")
+
+
 # ---------------------------------------------------------------------------
 # Non-agentic model warning
 # ---------------------------------------------------------------------------
@@ -1344,6 +1369,8 @@ def switch_model(
     new_model = raw_input.strip()
     target_provider = current_provider
     resolved_moa_preset = False
+    _bare_custom_base_url = ""
+    _bare_custom_api_key = ""
 
     # =================================================================
     # PATH A: Explicit --provider given
@@ -1356,7 +1383,15 @@ def switch_model(
             custom_providers,
         )
         if pdef is None and explicit_provider.strip().lower() == "custom":
-            pdef = _bare_custom_provider_def(current_base_url)
+            if _continues_custom_endpoint(current_provider) and current_base_url:
+                _bare_custom_base_url = str(current_base_url).strip()
+                _bare_custom_api_key = current_api_key
+            else:
+                (
+                    _bare_custom_base_url,
+                    _bare_custom_api_key,
+                ) = _configured_bare_custom_credentials()
+            pdef = _bare_custom_provider_def(_bare_custom_base_url)
         if pdef is None:
             _switch_err = (
                 f"Unknown provider '{explicit_provider}'. "
@@ -1729,9 +1764,9 @@ def switch_model(
                 api_key = _ukey
                 base_url = _user_pdef.base_url
                 api_mode = ""
-        elif target_provider == "custom" and current_base_url:
-            api_key = current_api_key
-            base_url = current_base_url
+        elif target_provider == "custom" and _bare_custom_base_url:
+            api_key = _bare_custom_api_key
+            base_url = _bare_custom_base_url
             api_mode = determine_api_mode(target_provider, base_url)
         else:
             try:
@@ -2903,17 +2938,32 @@ def list_authenticated_providers(
             if _pair[0] and _pair[1]:
                 _section3_emitted_pairs.add(_pair)
 
-    # --- 3b. Active bare custom endpoint from model config ---
+    # --- 3b. Bare custom endpoint from model config ---
     # A config can still use the direct one-off form:
     #   model.provider: custom
     #   model.base_url: https://some-openai-compatible/v1
     # In that shape there is no named providers:/custom_providers row for the
-    # picker to render, but the gateway only passes this current model slice to
-    # list_authenticated_providers(). Surface the active endpoint explicitly so
-    # /model does not look like it ignored config.yaml.
+    # picker to render. Surface the configured endpoint even when a session
+    # override currently points at another provider; otherwise importing a
+    # custom endpoint into config.yaml cannot make it selectable. An active
+    # custom/local session keeps its current endpoint so session-scoped custom
+    # switches retain their continuation semantics.
+    _configured_custom_url, _configured_custom_api_key = (
+        _configured_bare_custom_credentials()
+    )
+    _current_is_custom = _continues_custom_endpoint(_current_provider_norm)
+    _bare_custom_url = (
+        str(current_base_url or "").strip()
+        if _current_is_custom and current_base_url
+        else _configured_custom_url
+    )
+    _bare_custom_url_norm = _norm_url(_bare_custom_url)
+    _bare_custom_is_current = _current_is_custom and (
+        not _current_base_url_norm
+        or _current_base_url_norm == _bare_custom_url_norm
+    )
     if (
-        _current_provider_norm == "custom"
-        and current_base_url
+        _bare_custom_url
         and "custom" not in seen_slugs
         and not any(
             isinstance(_cp, dict)
@@ -2922,7 +2972,7 @@ def list_authenticated_providers(
                 or _cp.get("url", "")
                 or _cp.get("api", "")
             ).strip().rstrip("/").lower()
-            == str(current_base_url).strip().rstrip("/").lower()
+            == _bare_custom_url_norm
             for _cp in (custom_providers or [])
         )
     ):
@@ -2934,19 +2984,12 @@ def list_authenticated_providers(
         # default (1.5s fail-fast when for_picker).
         _probe_live = True
         try:
-            from hermes_cli.models import _get_model_config_dict, cached_fetch_api_models
+            from hermes_cli.models import cached_fetch_api_models
 
-            _model_cfg = _get_model_config_dict()
-            _api_key = (
-                str(_model_cfg.get("api_key", "") or "").strip()
-                or os.getenv("CUSTOM_API_KEY", "")
-                or os.getenv("OPENAI_API_KEY", "")
-                or os.getenv("OPENROUTER_API_KEY", "")
-            )
             _live_models = cached_fetch_api_models(
-                _api_key,
-                str(current_base_url).strip().rstrip("/"),
-                timeout=1.5 if for_picker else 5.0,  # picker: fail fast on a slow current endpoint
+                _configured_custom_api_key,
+                _bare_custom_url_norm,
+                timeout=1.5 if for_picker else 5.0,  # picker: fail fast on a slow custom endpoint
                 cache_only=not _probe_live,
             )
             if _live_models:
@@ -2956,12 +2999,12 @@ def list_authenticated_providers(
         results.append({
             "slug": "custom",
             "name": "Custom endpoint",
-            "is_current": True,
+            "is_current": _bare_custom_is_current,
             "is_user_defined": True,
             "models": _models[:max_models] if max_models is not None else _models,
             "total_models": len(_models),
             "source": "model-config",
-            "api_url": str(current_base_url).strip().rstrip("/"),
+            "api_url": _bare_custom_url.rstrip("/"),
         })
         seen_slugs.add("custom")
 
