@@ -2927,14 +2927,24 @@ def list_authenticated_providers(
         )
     ):
         _models = [current_model] if current_model else []
-        # As in sections 3 and 4: with live probing suppressed, fall back to
-        # the cached catalog rather than to the single active model.
-        _probe_live = bool(refresh or probe_current_custom_provider)
+        # Live-probe the active bare custom endpoint with its configured
+        # credential so /model reflects the upstream catalog (e.g. chybenzun:
+        # ['auto', '42']) instead of only the current model. Telegram's
+        # picker does not pass probe_current_custom_provider, so probe by
+        # default (1.5s fail-fast when for_picker).
+        _probe_live = True
         try:
-            from hermes_cli.models import cached_fetch_api_models
+            from hermes_cli.models import _get_model_config_dict, cached_fetch_api_models
 
+            _model_cfg = _get_model_config_dict()
+            _api_key = (
+                str(_model_cfg.get("api_key", "") or "").strip()
+                or os.getenv("CUSTOM_API_KEY", "")
+                or os.getenv("OPENAI_API_KEY", "")
+                or os.getenv("OPENROUTER_API_KEY", "")
+            )
             _live_models = cached_fetch_api_models(
-                "",
+                _api_key,
                 str(current_base_url).strip().rstrip("/"),
                 timeout=1.5 if for_picker else 5.0,  # picker: fail fast on a slow current endpoint
                 cache_only=not _probe_live,
